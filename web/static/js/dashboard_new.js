@@ -5,6 +5,8 @@ const dashboardState = {
     lastCandleTime: null,
     ws: null,
     wsReconnectTimer: null,
+    activeSelection: { symbol: null, timeframe: null },
+    defaultSelection: { symbol: null, timeframe: null },
     elements: {},
 };
 
@@ -112,13 +114,42 @@ function closeSocket() {
     }
 }
 
-function connectSocket() {
+function isMatchingLiveCandle(msg) {
+    const { activeSelection, defaultSelection } = dashboardState;
+    const { symbol, timeframe } = activeSelection || {};
+
+    const data = msg?.data || {};
+    const msgSymbol = msg.symbol || data.symbol;
+    const msgTimeframe = msg.tf || data.tf || data.timeframe;
+
+    if (symbol && timeframe && msgSymbol && msgTimeframe) {
+        return symbol === msgSymbol && timeframe === msgTimeframe;
+    }
+
+    // If the stream doesn't provide metadata, only accept it when we are viewing the
+    // default selection to avoid mixing instruments/intervals.
+    if (defaultSelection.symbol && defaultSelection.timeframe) {
+        return (
+            symbol === defaultSelection.symbol && timeframe === defaultSelection.timeframe
+        );
+    }
+
+    return true;
+}
+
+function connectSocket(symbol, timeframe) {
     closeSocket();
     const { wsDot } = dashboardState.elements;
     setDotState(wsDot, "warn");
 
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+    const params = new URLSearchParams();
+    if (symbol) params.set("symbol", symbol);
+    if (timeframe) params.set("tf", timeframe);
+    const query = params.toString();
+    const ws = new WebSocket(
+        `${protocol}://${window.location.host}/ws${query ? `?${query}` : ""}`
+    );
     dashboardState.ws = ws;
 
     ws.onopen = () => setDotState(wsDot, "ok");
@@ -126,7 +157,7 @@ function connectSocket() {
     ws.onmessage = (evt) => {
         try {
             const msg = JSON.parse(evt.data);
-            if (msg.type === "candle" && msg.data) {
+            if (msg.type === "candle" && msg.data && isMatchingLiveCandle(msg)) {
                 handleLiveCandle(msg.data);
             }
         } catch (err) {
@@ -138,7 +169,11 @@ function connectSocket() {
 
     ws.onclose = () => {
         setDotState(wsDot, "warn");
-        dashboardState.wsReconnectTimer = setTimeout(connectSocket, WS_RECONNECT_DELAY);
+        const { symbol, timeframe } = dashboardState.activeSelection || {};
+        dashboardState.wsReconnectTimer = setTimeout(
+            () => connectSocket(symbol, timeframe),
+            WS_RECONNECT_DELAY
+        );
     };
 }
 
@@ -153,6 +188,7 @@ async function loadHistoryAndStream() {
     try {
         const candles = await fetchCandles(symbolVal, tfVal);
         applyHistory(candles);
+        dashboardState.activeSelection = { symbol: symbolVal, timeframe: tfVal };
         setDotState(netDot, "ok");
     } catch (err) {
         console.error("Failed to load candles", err);
@@ -160,7 +196,7 @@ async function loadHistoryAndStream() {
         return;
     }
 
-    connectSocket();
+    connectSocket(symbolVal, tfVal);
 }
 
 function bindControls() {
@@ -189,6 +225,11 @@ function initDashboard() {
     dashboardState.elements = getElements();
     const { root } = dashboardState.elements;
     if (!root) return;
+
+    dashboardState.defaultSelection = {
+        symbol: dashboardState.elements.symbol?.value || null,
+        timeframe: dashboardState.elements.timeframe?.value || null,
+    };
 
     const chartSetup = createChart(root);
     if (!chartSetup) return;
