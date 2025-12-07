@@ -1,4 +1,40 @@
-const WS_URL = (location.protocol === "https:" ? "wss" : "ws") + "://" + location.host + "/ws";
+const WS_RECONNECT_DELAY = 3000;
+const DEFAULT_LIMIT = 300;
+const TRADES_LIMIT = 5000;
+
+const dashboardState = {
+    chart: null,
+    candleSeries: null,
+    candles: [],
+    lastCandleTime: null,
+    ws: null,
+    wsReconnectTimer: null,
+    activeSelection: { symbol: null, timeframe: null },
+    defaultSelection: { symbol: null, timeframe: null },
+    elements: {},
+    tradesStore: null,
+};
+
+function getElements() {
+    return {
+        root: document.getElementById("chart-root"),
+        symbol: document.getElementById("symbol"),
+        timeframe: document.getElementById("tf"),
+        wsDot: document.getElementById("st-inline-ws"),
+        netDot: document.getElementById("st-inline-net"),
+        dealsValue: document.getElementById("deals-value"),
+    };
+}
+
+function setDotState(el, state) {
+    if (!el) return;
+    const classes = ["cbp-dot-ok", "cbp-dot-warn", "cbp-dot-bad"];
+    classes.forEach((c) => el.classList.remove(c));
+    const map = { ok: "cbp-dot-ok", warn: "cbp-dot-warn", bad: "cbp-dot-bad" };
+    if (map[state]) {
+        el.classList.add(map[state]);
+    }
+}
 
 function fetchJSON(url, options) {
     return fetch(url, options).then(async (res) => {
@@ -57,28 +93,39 @@ class ChartWithTrades {
 
     _initChart() {
         if (!this.rootEl || !window.LightweightCharts) return;
+
         this.chart = LightweightCharts.createChart(this.rootEl, {
             width: this.rootEl.clientWidth,
             height: this.rootEl.clientHeight || 480,
-            layout: { background: { color: "#0f172a" }, textColor: "#cbd5e1" },
+            layout: { background: { color: "#0f0f0f" }, textColor: "#e2e8f0" },
             grid: {
-                vertLines: { color: "#111827" },
-                horzLines: { color: "#111827" },
+                vertLines: { color: "#181818" },
+                horzLines: { color: "#181818" },
             },
-            timeScale: { timeVisible: true, secondsVisible: true },
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: false,
+                borderColor: "#30363d",
+            },
+            rightPriceScale: { borderColor: "#30363d" },
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
         });
+
         this.candleSeries = this.chart.addCandlestickSeries({
-            upColor: "#22c55e",
-            downColor: "#ef4444",
-            wickUpColor: "#22c55e",
-            wickDownColor: "#ef4444",
-            borderVisible: false,
+            upColor: "#2ecc71",
+            downColor: "#ef5350",
+            borderDownColor: "#ef5350",
+            borderUpColor: "#2ecc71",
+            wickDownColor: "#ef5350",
+            wickUpColor: "#2ecc71",
         });
 
         window.addEventListener("resize", () => {
             if (!this.chart) return;
-            this.chart.applyOptions({ width: this.rootEl.clientWidth });
+            this.chart.applyOptions({
+                width: this.rootEl.clientWidth,
+                height: this.rootEl.clientHeight || 480,
+            });
         });
 
         this.chart.subscribeCrosshairMove((param) => {
@@ -93,6 +140,12 @@ class ChartWithTrades {
                 this._setActiveTrade(null);
             }
         });
+    }
+
+    applyOptions(opts) {
+        if (this.chart) {
+            this.chart.applyOptions(opts);
+        }
     }
 
     setCandles(candles) {
@@ -209,12 +262,13 @@ class ChartWithTrades {
     }
 }
 
-async function bootstrap() {
-    const root = document.getElementById("chart-root");
-    if (!root) return;
+function createChart(root) {
+    if (!root) return null;
+    root.innerHTML = "";
 
-    const tradesStore = new TradesStore(5000);
+    const tradesStore = new TradesStore(TRADES_LIMIT);
     window.__tradesStore = tradesStore;
+    dashboardState.tradesStore = tradesStore;
 
     const chart = new ChartWithTrades(root, (tradeId) => {
         window.dispatchEvent(
@@ -222,74 +276,250 @@ async function bootstrap() {
         );
     });
 
-    const symbolEl = document.getElementById("symbol");
-    const tfEl = document.getElementById("tf");
-    const dealsValue = document.getElementById("deals-value");
-    const wsDot = document.getElementById("st-inline-ws");
-
-    const updateDeals = () => {
-        if (dealsValue) dealsValue.textContent = tradesStore.getAll().length;
-    };
-
-    async function loadCandles() {
-        const symbol = symbolEl ? symbolEl.value : "BTCUSDT";
-        const tf = tfEl ? tfEl.value : "1m";
-        const data = await fetchJSON(
-            `/api/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}`
-        );
-        const candles = data.data || data.candles || [];
-        chart.setCandles(candles);
-    }
-
-    async function loadTrades() {
-        const data = await fetchJSON("/api/trades?limit=5000");
-        const trades = data.trades || [];
-        tradesStore.replace(trades);
-        chart.setTrades(tradesStore.getAll());
-        updateDeals();
-    }
-
-    function connectWs() {
-        const ws = new WebSocket(WS_URL);
-        if (wsDot) wsDot.className = "cbp-dot cbp-dot-warn";
-
-        ws.onopen = () => {
-            if (wsDot) wsDot.className = "cbp-dot cbp-dot-ok";
-        };
-        ws.onclose = () => {
-            if (wsDot) wsDot.className = "cbp-dot cbp-dot-bad";
-            setTimeout(connectWs, 2000);
-        };
-        ws.onerror = () => {
-            if (wsDot) wsDot.className = "cbp-dot cbp-dot-bad";
-        };
-        ws.onmessage = (msg) => {
-            try {
-                const payload = JSON.parse(msg.data);
-                if (payload.type === "candle") {
-                    chart.updateCandle(payload.data);
-                }
-                if (payload.type === "trade") {
-                    tradesStore.add(payload.data);
-                    chart.setTrades(tradesStore.getAll());
-                    updateDeals();
-                }
-            } catch (e) {
-                console.error("WS parse error", e);
-            }
-        };
-    }
-
-    async function loadAll() {
-        await loadCandles();
-        await loadTrades();
-    }
-
-    if (symbolEl) symbolEl.addEventListener("change", loadAll);
-    if (tfEl) tfEl.addEventListener("change", loadAll);
-
-    await loadAll();
-    connectWs();
+    return { chart, candleSeries: chart.candleSeries };
 }
 
-window.addEventListener("DOMContentLoaded", bootstrap);
+function normalizeCandle(c) {
+    return {
+        time: Number(c.time),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+    };
+}
+
+async function fetchCandles(symbol, timeframe) {
+    const url = `/api/candles?symbol=${encodeURIComponent(
+        symbol
+    )}&tf=${encodeURIComponent(timeframe)}&limit=${DEFAULT_LIMIT}`;
+    const payload = await fetchJSON(url);
+    const data = payload.data || payload.candles || [];
+    return data.map(normalizeCandle).sort((a, b) => a.time - b.time);
+}
+
+async function fetchTrades(limit = TRADES_LIMIT) {
+    const payload = await fetchJSON(`/api/trades?limit=${limit}`);
+    return payload.trades || [];
+}
+
+function applyHistory(candles) {
+    dashboardState.candles = candles;
+    dashboardState.lastCandleTime = candles.length
+        ? candles[candles.length - 1].time
+        : null;
+
+    if (
+        dashboardState.chart &&
+        typeof dashboardState.chart.setCandles === "function"
+    ) {
+        dashboardState.chart.setCandles(candles);
+    } else if (dashboardState.candleSeries) {
+        dashboardState.candleSeries.setData(candles);
+    }
+}
+
+function handleLiveCandle(candle) {
+    const item = normalizeCandle(candle);
+    dashboardState.lastCandleTime = Math.max(
+        dashboardState.lastCandleTime || 0,
+        item.time
+    );
+
+    if (
+        dashboardState.chart &&
+        typeof dashboardState.chart.updateCandle === "function"
+    ) {
+        dashboardState.chart.updateCandle(item);
+    } else if (dashboardState.candleSeries) {
+        dashboardState.candleSeries.update(item);
+    }
+}
+
+function closeSocket() {
+    if (dashboardState.wsReconnectTimer) {
+        clearTimeout(dashboardState.wsReconnectTimer);
+        dashboardState.wsReconnectTimer = null;
+    }
+    if (dashboardState.ws) {
+        dashboardState.ws.onopen = null;
+        dashboardState.ws.onmessage = null;
+        dashboardState.ws.onclose = null;
+        dashboardState.ws.onerror = null;
+        dashboardState.ws.close();
+        dashboardState.ws = null;
+    }
+}
+
+function isMatchingLiveCandle(msg) {
+    const { activeSelection, defaultSelection } = dashboardState;
+    const { symbol, timeframe } = activeSelection || {};
+
+    const data = msg?.data || {};
+    const msgSymbol = msg.symbol || data.symbol;
+    const msgTimeframe = msg.tf || data.tf || data.timeframe;
+
+    if (symbol && timeframe && msgSymbol && msgTimeframe) {
+        return symbol === msgSymbol && timeframe === msgTimeframe;
+    }
+
+    // Если стрим не даёт метаданные, принимаем только когда
+    // мы на дефолтном выборе инструмента/таймфрейма.
+    if (defaultSelection.symbol && defaultSelection.timeframe) {
+        return (
+            symbol === defaultSelection.symbol &&
+            timeframe === defaultSelection.timeframe
+        );
+    }
+
+    return true;
+}
+
+function connectSocket(symbol, timeframe) {
+    closeSocket();
+    const { wsDot, dealsValue } = dashboardState.elements;
+    setDotState(wsDot, "warn");
+
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const params = new URLSearchParams();
+    if (symbol) params.set("symbol", symbol);
+    if (timeframe) params.set("tf", timeframe);
+    const query = params.toString();
+    const ws = new WebSocket(
+        `${protocol}://${window.location.host}/ws${query ? `?${query}` : ""}`
+    );
+    dashboardState.ws = ws;
+
+    ws.onopen = () => setDotState(wsDot, "ok");
+    ws.onerror = () => setDotState(wsDot, "bad");
+
+    ws.onclose = () => {
+        setDotState(wsDot, "warn");
+        const { symbol: sym, timeframe: tf } =
+            dashboardState.activeSelection || {};
+        dashboardState.wsReconnectTimer = setTimeout(
+            () => connectSocket(sym, tf),
+            WS_RECONNECT_DELAY
+        );
+    };
+
+    ws.onmessage = (evt) => {
+        try {
+            const msg = JSON.parse(evt.data);
+
+            if (msg.type === "candle" && msg.data && isMatchingLiveCandle(msg)) {
+                handleLiveCandle(msg.data);
+            }
+
+            if (msg.type === "trade" && msg.data && isMatchingLiveCandle(msg)) {
+                const store = dashboardState.tradesStore;
+                if (store) {
+                    store.add(msg.data);
+                    if (
+                        dashboardState.chart &&
+                        typeof dashboardState.chart.setTrades === "function"
+                    ) {
+                        dashboardState.chart.setTrades(store.getAll());
+                    }
+                    if (dealsValue) {
+                        dealsValue.textContent = store.getAll().length;
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("WS message parse error", err);
+        }
+    };
+}
+
+async function loadHistoryAndStream() {
+    const { netDot, symbol, timeframe, dealsValue } = dashboardState.elements;
+    if (!symbol || !timeframe) return;
+
+    const symbolVal = symbol.value;
+    const tfVal = timeframe.value;
+
+    setDotState(netDot, "warn");
+    try {
+        const candles = await fetchCandles(symbolVal, tfVal);
+        applyHistory(candles);
+        dashboardState.activeSelection = {
+            symbol: symbolVal,
+            timeframe: tfVal,
+        };
+        setDotState(netDot, "ok");
+    } catch (err) {
+        console.error("Failed to load candles", err);
+        setDotState(netDot, "bad");
+        return;
+    }
+
+    // Исторические трейды (best-effort)
+    try {
+        if (dashboardState.tradesStore) {
+            const trades = await fetchTrades(TRADES_LIMIT);
+            dashboardState.tradesStore.replace(trades);
+            if (
+                dashboardState.chart &&
+                typeof dashboardState.chart.setTrades === "function"
+            ) {
+                dashboardState.chart.setTrades(
+                    dashboardState.tradesStore.getAll()
+                );
+            }
+            if (dealsValue) {
+                dealsValue.textContent =
+                    dashboardState.tradesStore.getAll().length;
+            }
+        }
+    } catch (err) {
+        console.error("Failed to load trades", err);
+    }
+
+    connectSocket(symbolVal, tfVal);
+}
+
+function bindControls() {
+    const { symbol, timeframe } = dashboardState.elements;
+    if (symbol) {
+        symbol.addEventListener("change", () => loadHistoryAndStream());
+    }
+    if (timeframe) {
+        timeframe.addEventListener("change", () => loadHistoryAndStream());
+    }
+}
+
+function observeResize(root) {
+    if (!window.ResizeObserver || !root) return;
+    const ro = new ResizeObserver(() => {
+        if (!dashboardState.chart) return;
+        dashboardState.chart.applyOptions({
+            width: root.clientWidth,
+            height: root.clientHeight,
+        });
+    });
+    ro.observe(root);
+}
+
+function initDashboard() {
+    dashboardState.elements = getElements();
+    const { root } = dashboardState.elements;
+    if (!root) return;
+
+    dashboardState.defaultSelection = {
+        symbol: dashboardState.elements.symbol?.value || null,
+        timeframe: dashboardState.elements.timeframe?.value || null,
+    };
+
+    const chartSetup = createChart(root);
+    if (!chartSetup) return;
+
+    dashboardState.chart = chartSetup.chart;
+    dashboardState.candleSeries = chartSetup.candleSeries;
+
+    bindControls();
+    observeResize(root);
+    loadHistoryAndStream();
+}
+
+window.addEventListener("load", initDashboard);
