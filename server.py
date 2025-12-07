@@ -2,6 +2,10 @@ import os
 USE_MOCK = os.getenv("CBP_USE_MOCK", "1") == "1"
 
 import os
+import random
+import time
+from typing import List
+
 from web.bybit_client import fetch_ohlcv
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +37,38 @@ templates = Jinja2Templates(directory="web/templates")
 analytics = AnalyticsEngine()
 status_monitor = StatusMonitor()
 backtest_engine = BacktestEngine()
+
+
+# ------------------------
+# MOCK HELPERS
+# ------------------------
+def _build_mock_trades(limit: int = 50) -> List[dict]:
+    now = int(time.time())
+    trades = []
+    cursor = now - limit * 90
+    last_price = 50000
+    for i in range(limit):
+        direction = "long" if i % 2 == 0 else "short"
+        entry_time = cursor + i * 60
+        exit_time = entry_time + random.randint(30, 240)
+        if direction == "long":
+            entry_price = last_price + random.randint(-50, 50)
+            exit_price = entry_price + random.randint(-80, 120)
+        else:
+            entry_price = last_price + random.randint(-50, 50)
+            exit_price = entry_price - random.randint(-120, 80)
+        last_price = exit_price
+        trades.append(
+            {
+                "id": f"mock-{i}",
+                "side": direction,
+                "entry_time": entry_time,
+                "exit_time": exit_time,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+            }
+        )
+    return trades
 
 
 # ------------------------
@@ -111,3 +147,14 @@ async def api_candles(
     # REAL TESTNET: тянем свечи с Bybit
     candles = await fetch_ohlcv(symbol=symbol, tf=tf, limit=limit)
     return {"symbol": symbol, "tf": tf, "data": candles}
+
+
+@app.get("/api/trades")
+async def api_trades(limit: int = 50):
+    """Return recent trades for the chart overlay.
+
+    In mock mode we emit synthetic trades that align with the candle timestamps.
+    """
+
+    trades = _build_mock_trades(limit=limit)
+    return {"trades": trades, "meta": {"source": "mock_stream"}}
