@@ -1,10 +1,13 @@
 import os
 USE_MOCK = os.getenv("CBP_USE_MOCK", "1") == "1"
 
-import os
 import random
 import time
 from typing import List
+
+MOCK_CANDLE_BASE_TIME = 1730000000
+MOCK_CANDLE_INTERVAL = 60
+MOCK_CANDLE_LIMIT = 200
 
 from web.bybit_client import fetch_ohlcv
 from fastapi import FastAPI, WebSocket, Request
@@ -43,20 +46,28 @@ backtest_engine = BacktestEngine()
 # MOCK HELPERS
 # ------------------------
 def _build_mock_trades(limit: int = 50) -> List[dict]:
-    now = int(time.time())
+    """Construct synthetic trades that align with the mock candle timeline."""
+
     trades = []
-    cursor = now - limit * 90
     last_price = 50000
+    candle_span_end = MOCK_CANDLE_BASE_TIME + (MOCK_CANDLE_LIMIT - 1) * MOCK_CANDLE_INTERVAL
+
     for i in range(limit):
         direction = "long" if i % 2 == 0 else "short"
-        entry_time = cursor + i * 60
-        exit_time = entry_time + random.randint(30, 240)
+        candle_index = i % MOCK_CANDLE_LIMIT
+        entry_time = MOCK_CANDLE_BASE_TIME + candle_index * MOCK_CANDLE_INTERVAL
+        exit_time = min(
+            entry_time + random.randint(30, 240),
+            candle_span_end,
+        )
+
         if direction == "long":
             entry_price = last_price + random.randint(-50, 50)
             exit_price = entry_price + random.randint(-80, 120)
         else:
             entry_price = last_price + random.randint(-50, 50)
             exit_price = entry_price - random.randint(-120, 80)
+
         last_price = exit_price
         trades.append(
             {
@@ -68,6 +79,8 @@ def _build_mock_trades(limit: int = 50) -> List[dict]:
                 "exit_price": exit_price,
             }
         )
+
+    trades.sort(key=lambda trade: trade["entry_time"])
     return trades
 
 
@@ -136,7 +149,7 @@ async def api_candles(
         candles = []
         for i in range(limit):
             candles.append({
-                "time": 1730000000 + i * 60,
+                "time": MOCK_CANDLE_BASE_TIME + i * MOCK_CANDLE_INTERVAL,
                 "open": 50000,
                 "high": 50500,
                 "low": 49500,
